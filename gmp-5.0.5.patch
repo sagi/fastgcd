@@ -1,0 +1,289 @@
+diff -ur gmp-5.0.5/gmp-h.in gmp-5.0.5-patched/gmp-h.in
+--- gmp-5.0.5/gmp-h.in	2012-05-06 07:19:49.000000000 -0400
++++ gmp-5.0.5-patched/gmp-h.in	2012-06-28 23:57:34.000752852 -0400
+@@ -934,6 +934,11 @@
+ __GMP_DECLSPEC size_t mpz_inp_raw __GMP_PROTO ((mpz_ptr, FILE *));
+ #endif
+ 
++#define mpz_inp_raw_64 __gmpz_inp_raw_64
++#ifdef _GMP_H_HAVE_FILE
++__GMP_DECLSPEC size_t mpz_inp_raw_64 __GMP_PROTO ((mpz_ptr, FILE *));
++#endif
++
+ #define mpz_inp_str __gmpz_inp_str
+ #ifdef _GMP_H_HAVE_FILE
+ __GMP_DECLSPEC size_t mpz_inp_str __GMP_PROTO ((mpz_ptr, FILE *, int));
+@@ -1009,6 +1014,11 @@
+ __GMP_DECLSPEC size_t mpz_out_raw __GMP_PROTO ((FILE *, mpz_srcptr));
+ #endif
+ 
++#define mpz_out_raw_64 __gmpz_out_raw_64
++#ifdef _GMP_H_HAVE_FILE
++__GMP_DECLSPEC size_t mpz_out_raw_64 __GMP_PROTO ((FILE *, mpz_srcptr));
++#endif
++
+ #define mpz_out_str __gmpz_out_str
+ #ifdef _GMP_H_HAVE_FILE
+ __GMP_DECLSPEC size_t mpz_out_str __GMP_PROTO ((FILE *, int, mpz_srcptr));
+Only in gmp-5.0.5-patched: gmp-h.in.orig
+diff -ur gmp-5.0.5/mpz/inp_raw.c gmp-5.0.5-patched/mpz/inp_raw.c
+--- gmp-5.0.5/mpz/inp_raw.c	2012-05-06 07:19:50.000000000 -0400
++++ gmp-5.0.5-patched/mpz/inp_raw.c	2012-06-28 23:57:34.000752852 -0400
+@@ -161,3 +161,120 @@
+   SIZ(x) = (csize >= 0 ? abs_xsize : -abs_xsize);
+   return abs_csize + 4;
+ }
++
++
++size_t
++mpz_inp_raw_64 (mpz_ptr x, FILE *fp)
++{
++  unsigned char  csize_bytes[8];
++  int64_t      csize, abs_xsize, i;
++  size_t         abs_csize;
++  char           *cp;
++  mp_ptr         xp, sp, ep;
++  mp_limb_t      slimb, elimb;
++
++  if (fp == 0)
++    fp = stdin;
++
++  /* 8 bytes for size */
++  if (fread (csize_bytes, sizeof (csize_bytes), 1, fp) != 1)
++    return 0;
++
++  csize =
++    (  (uint64_t) csize_bytes[0] << 56)
++    + ((uint64_t) csize_bytes[1] << 48)
++    + ((uint64_t) csize_bytes[2] << 40)
++    + ((uint64_t) csize_bytes[3] << 32)
++    + ((uint64_t) csize_bytes[4] << 24)
++    + ((uint64_t) csize_bytes[5] << 16)
++    + ((uint64_t) csize_bytes[6] << 8)
++    + ((uint64_t) csize_bytes[7]);
++
++  /* Sign extend if necessary.
++     Could write "csize -= ((csize & 0x80000000L) << 1)", but that tickles a
++     bug in gcc 3.0 for powerpc64 on AIX.  */
++  if (sizeof (csize) > 8 && csize & 0x8000000000000000LL)
++    csize -= 0x8000000000000000LL << 1;
++
++  abs_csize = ABS (csize);
++
++  /* round up to a multiple of limbs */
++  abs_xsize = (abs_csize*8 + GMP_NUMB_BITS-1) / GMP_NUMB_BITS;
++
++  if (abs_xsize != 0)
++    {
++      MPZ_REALLOC (x, abs_xsize);
++      xp = PTR(x);
++
++      /* Get limb boundaries right in the read, for the benefit of the
++         non-nails case.  */
++      xp[0] = 0;
++      cp = (char *) (xp + abs_xsize) - abs_csize;
++      if (fread (cp, abs_csize, 1, fp) != 1)
++        return 0;
++
++      if (GMP_NAIL_BITS == 0)
++        {
++          /* Reverse limbs to least significant first, and byte swap.  If
++             abs_xsize is odd then on the last iteration elimb and slimb are
++             the same.  It doesn't seem extra code to handle that case
++             separately, to save an NTOH.  */
++          sp = xp;
++          ep = xp + abs_xsize-1;
++          for (i = 0; i < (abs_xsize+1)/2; i++)
++            {
++              NTOH_LIMB_FETCH (elimb, ep);
++              NTOH_LIMB_FETCH (slimb, sp);
++              *sp++ = elimb;
++              *ep-- = slimb;
++            }
++        }
++      else
++        {
++          /* It ought to be possible to do the transformation in-place, but
++             for now it's easier to use an extra temporary area.  */
++          mp_limb_t  byte, limb;
++          int        bits;
++          mp_size_t  tpos;
++          mp_ptr     tp;
++          TMP_DECL;
++
++          TMP_MARK;
++          tp = TMP_ALLOC_LIMBS (abs_xsize);
++          limb = 0;
++          bits = 0;
++          tpos = 0;
++          for (i = abs_csize-1; i >= 0; i--)
++            {
++              byte = (unsigned char) cp[i];
++              limb |= (byte << bits);
++              bits += 8;
++              if (bits >= GMP_NUMB_BITS)
++                {
++                  ASSERT (tpos < abs_xsize);
++                  tp[tpos++] = limb & GMP_NUMB_MASK;
++                  bits -= GMP_NUMB_BITS;
++                  ASSERT (bits < 8);
++                  limb = byte >> (8 - bits);
++                }
++            }
++          if (bits != 0)
++            {
++              ASSERT (tpos < abs_xsize);
++              tp[tpos++] = limb;
++            }
++          ASSERT (tpos == abs_xsize);
++
++          MPN_COPY (xp, tp, abs_xsize);
++          TMP_FREE;
++        }
++
++      /* GMP 1.x mpz_out_raw wrote high zero bytes, strip any high zero
++         limbs resulting from this.  Should be a non-zero value here, but
++         for safety don't assume that. */
++      MPN_NORMALIZE (xp, abs_xsize);
++    }
++
++  SIZ(x) = (csize >= 0 ? abs_xsize : -abs_xsize);
++  return abs_csize + 8;
++}
+diff -ur gmp-5.0.5/mpz/out_raw.c gmp-5.0.5-patched/mpz/out_raw.c
+--- gmp-5.0.5/mpz/out_raw.c	2012-05-06 07:19:50.000000000 -0400
++++ gmp-5.0.5-patched/mpz/out_raw.c	2012-06-28 23:57:34.000752852 -0400
+@@ -18,6 +18,7 @@
+ along with the GNU MP Library.  If not, see http://www.gnu.org/licenses/.  */
+ 
+ #include <stdio.h>
++#include <stdint.h>
+ #include "gmp.h"
+ #include "gmp-impl.h"
+ #include "longlong.h"
+@@ -154,6 +155,125 @@
+ 
+   if (fp == 0)
+     fp = stdout;
++  if (fwrite (bp, ssize, 1, fp) != 1)
++    ssize = 0;
++
++  (*__gmp_free_func) (tp, tsize);
++  return ssize;
++}
++
++size_t
++mpz_out_raw_64 (FILE *fp, mpz_srcptr x)
++{
++  int64_t   xsize, abs_xsize, bytes, i;
++  mp_srcptr   xp;
++  char        *tp, *bp;
++  mp_limb_t   xlimb;
++  int         zeros;
++  size_t      tsize, ssize;
++
++  xsize = SIZ(x);
++  abs_xsize = ABS (xsize);
++  bytes = (abs_xsize * GMP_NUMB_BITS + 7) / 8;
++  tsize = ROUND_UP_MULTIPLE ((unsigned) 4, BYTES_PER_MP_LIMB) + bytes;
++
++  tp = __GMP_ALLOCATE_FUNC_TYPE (tsize, char);
++  bp = tp + ROUND_UP_MULTIPLE ((unsigned) 4, BYTES_PER_MP_LIMB);
++
++  if (bytes != 0)
++    {
++      bp += bytes;
++      xp = PTR (x);
++      i = abs_xsize;
++
++      if (GMP_NAIL_BITS == 0)
++        {
++          /* reverse limb order, and byte swap if necessary */
++#ifdef _CRAY
++          _Pragma ("_CRI ivdep");
++#endif
++          do
++            {
++              bp -= BYTES_PER_MP_LIMB;
++              xlimb = *xp;
++              HTON_LIMB_STORE ((mp_ptr) bp, xlimb);
++              xp++;
++            }
++          while (--i > 0);
++
++          /* strip high zero bytes (without fetching from bp) */
++          count_leading_zeros (zeros, xlimb);
++          zeros /= 8;
++          bp += zeros;
++          bytes -= zeros;
++        }
++      else
++        {
++          mp_limb_t  new_xlimb;
++          int        bits;
++          ASSERT_CODE (char *bp_orig = bp - bytes);
++
++          ASSERT_ALWAYS (GMP_NUMB_BITS >= 8);
++
++          bits = 0;
++          xlimb = 0;
++          for (;;)
++            {
++              while (bits >= 8)
++                {
++                  ASSERT (bp > bp_orig);
++                  *--bp = xlimb & 0xFF;
++                  xlimb >>= 8;
++                  bits -= 8;
++                }
++
++              if (i == 0)
++                break;
++
++              new_xlimb = *xp++;
++              i--;
++              ASSERT (bp > bp_orig);
++              *--bp = (xlimb | (new_xlimb << bits)) & 0xFF;
++              xlimb = new_xlimb >> (8 - bits);
++              bits += GMP_NUMB_BITS - 8;
++            }
++
++          if (bits != 0)
++            {
++              ASSERT (bp > bp_orig);
++              *--bp = xlimb;
++            }
++
++          ASSERT (bp == bp_orig);
++          while (*bp == 0)
++            {
++              bp++;
++              bytes--;
++            }
++        }
++    }
++
++  /* total bytes to be written */
++  ssize = 8 + bytes;
++
++  /* twos complement negative for the size value */
++  bytes = (xsize >= 0 ? bytes : -bytes);
++
++  /* so we don't rely on sign extension in ">>" */
++  ASSERT_ALWAYS (sizeof (bytes) >= 8);
++
++  bp[-8] = bytes >> 56;
++  bp[-7] = bytes >> 48;
++  bp[-6] = bytes >> 40;
++  bp[-5] = bytes >> 32;
++  bp[-4] = bytes >> 24;
++  bp[-3] = bytes >> 16;
++  bp[-2] = bytes >> 8;
++  bp[-1] = bytes;
++  bp -= 8;
++
++  if (fp == 0)
++    fp = stdout;
+   if (fwrite (bp, ssize, 1, fp) != 1)
+     ssize = 0;
+ 
