@@ -1,0 +1,14 @@
+# whitelist
+# ignore everything
+*
+# except for
+fastgcd.c
+gmp-5.05.patch
+input.moduli
+install.sh
+LICENSE
+Makefile
+README
+sample.out/
+sample.out/*
+.gitignore
